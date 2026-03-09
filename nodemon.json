@@ -1,0 +1,13 @@
+{
+    "watch": [
+        "server",
+        ".env"
+    ],
+    "ext": "ts,js,json,html",
+    "ignore": [
+        "node_modules",
+        "dist"
+    ],
+    "delay": "1000",
+    "exec": "tsx ./server/server.ts"
+}
