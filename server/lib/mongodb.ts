@@ -15,11 +15,15 @@ export async function getMongoDb(): Promise<Db> {
         socketTimeoutMS: 30000,
     });
     await client.connect();
-    db = client.db("hospital_data");
+    db = client.db("medmap");
     return db;
 }
 
-export async function getHospitalCollection(): Promise<Collection> {
+export async function getCollection(name: string): Promise<Collection> {
     const database = await getMongoDb();
-    return database.collection("hospital");
+    return database.collection(name);
+}
+
+export async function getHospitalCollection(): Promise<Collection> {
+    return getCollection("hospitals");
 }

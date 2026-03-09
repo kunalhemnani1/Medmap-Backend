@@ -14,15 +14,16 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(uuid())
+  id            String     @id @default(uuid())
   name          String
-  email         String    @unique
-  createdAt     DateTime  @default(now())
-  emailVerified Boolean   @default(false)
+  email         String     @unique
+  createdAt     DateTime   @default(now())
+  emailVerified Boolean    @default(false)
   image         String?
-  updatedAt     DateTime  @updatedAt
+  updatedAt     DateTime   @updatedAt
   sessions      Session[]
   accounts      Account[]
+  bookmarks     Bookmark[]
 
   role String? @default("user")
 
@@ -75,4 +76,17 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+model Bookmark {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hospitalId Int
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, hospitalId])
+  @@index([userId])
+  @@map("bookmark")
 }
