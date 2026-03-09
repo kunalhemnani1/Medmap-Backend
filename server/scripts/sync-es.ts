@@ -12,46 +12,53 @@ const JSON_DATA_PATH = resolve(
     "../../../datahub/hospitals.json"
 );
 
-interface HospitalDoc {
-    id: string;
-    name: string;
-    type: string;
-    address: string;
-    city: string;
-    district: string;
-    state: string;
-    pincode: number;
-    location_coordinates: string;
-    latitude: number;
-    longitude: number;
-    telephone: string;
-    mobile: string;
-    emergency: string;
-    email: string;
-    website: string;
-    specialties: string[];
-    beds: number;
-    rating: number;
-    review_count: number;
-    accreditations: string[];
-    established_year: number;
-    has_emergency: boolean;
-    has_ambulance: boolean;
-    has_pharmacy: boolean;
-    has_blood_bank: boolean;
-    has_icu: boolean;
-    accepts_insurance: boolean;
-    consultation_fee_range: number[];
-    avg_wait_time_days: number;
-    image_url: string;
-    created_at: string;
-    updated_at: string;
+// Raw shape from hospitals.json
+interface RawHospital {
+    Sr_No: number;
+    Location_Coordinates: string;
+    Location: string;
+    Hospital_Name: string;
+    Address_Original_First_Line: string;
+    State: string;
+    District: string;
+    Pincode: number;
+    Telephone: string | number;
+    Mobile_Number: string | number;
+    Emergency_Num: string | number;
+}
+
+function parseCoordinates(coord: string): { lat: number; lon: number } | null {
+    if (!coord || !coord.trim()) return null;
+    const parts = coord.split(",").map((s) => parseFloat(s.trim()));
+    if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        return { lat: parts[0], lon: parts[1] };
+    }
+    return null;
+}
+
+function transformHospital(raw: RawHospital) {
+    const coords = parseCoordinates(raw.Location_Coordinates);
+    return {
+        id: `HOSP${String(raw.Sr_No).padStart(5, "0")}`,
+        name: raw.Hospital_Name,
+        address: raw.Address_Original_First_Line || raw.Location || "",
+        state: raw.State,
+        district: raw.District,
+        pincode: raw.Pincode,
+        latitude: coords?.lat ?? null,
+        longitude: coords?.lon ?? null,
+        location: coords, // geo_point — null if no coordinates
+        location_coordinates: raw.Location_Coordinates || "",
+        telephone: String(raw.Telephone || ""),
+        mobile: String(raw.Mobile_Number || ""),
+        emergency: String(raw.Emergency_Num || ""),
+    };
 }
 
 async function syncElasticsearch() {
     console.log(`Reading data from: ${JSON_DATA_PATH}`);
     const rawJson = readFileSync(JSON_DATA_PATH, "utf-8");
-    const docs: HospitalDoc[] = JSON.parse(rawJson);
+    const docs: RawHospital[] = JSON.parse(rawJson);
     console.log(`Loaded ${docs.length} documents.`);
 
     const es = getElasticClient();
@@ -86,10 +93,13 @@ async function syncElasticsearch() {
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {
         const batch = docs.slice(i, i + BATCH_SIZE);
-        const body = batch.flatMap((doc) => [
-            { index: { _index: HOSPITAL_INDEX, _id: doc.id } },
-            doc,
-        ]);
+        const body = batch.flatMap((raw) => {
+            const doc = transformHospital(raw);
+            return [
+                { index: { _index: HOSPITAL_INDEX, _id: doc.id } },
+                doc,
+            ];
+        });
 
         const result = await es.bulk({ body, refresh: false });
         if (result.errors) {

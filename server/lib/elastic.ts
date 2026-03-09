@@ -25,6 +25,7 @@ export const HOSPITAL_MAPPINGS = {
         location_coordinates: { type: "text" as const },
         latitude: { type: "float" as const },
         longitude: { type: "float" as const },
+        location: { type: "geo_point" as const },
         telephone: { type: "keyword" as const },
         mobile: { type: "keyword" as const },
         emergency: { type: "keyword" as const },

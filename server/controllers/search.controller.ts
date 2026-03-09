@@ -42,6 +42,9 @@ export async function searchHospitals(req: Request, res: Response) {
             page: pageStr = "1",
             limit: limitStr = "12",
             sort = "relevance",
+            lat,
+            lon,
+            distance,
         } = req.query as SearchQuery;
 
         const page = Math.max(1, parseInt(pageStr) || 1);
@@ -59,6 +62,10 @@ export async function searchHospitals(req: Request, res: Response) {
         }
 
         const es = getElasticClient();
+
+        const userLat = lat ? parseFloat(lat) : null;
+        const userLon = lon ? parseFloat(lon) : null;
+        const distKm = distance ? parseFloat(distance) : null;
 
         // ── Build Elasticsearch query ─────────────────────────────────────────
         const must: any[] = [];
@@ -90,6 +97,16 @@ export async function searchHospitals(req: Request, res: Response) {
             if (!isNaN(pin)) filter.push({ term: { pincode: pin } });
         }
 
+        // Geo distance filter
+        if (userLat != null && userLon != null && distKm != null) {
+            filter.push({
+                geo_distance: {
+                    distance: `${distKm}km`,
+                    location: { lat: userLat, lon: userLon },
+                },
+            });
+        }
+
         const esQuery: any = {
             bool: {
                 ...(must.length > 0 ? { must } : { must: [{ match_all: {} }] }),
@@ -99,7 +116,15 @@ export async function searchHospitals(req: Request, res: Response) {
 
         // ── Sort ──────────────────────────────────────────────────────────────
         const esSort: any[] = [];
-        if (sort === "name-asc") {
+        if (sort === "distance" && userLat != null && userLon != null) {
+            esSort.push({
+                _geo_distance: {
+                    location: { lat: userLat, lon: userLon },
+                    order: "asc",
+                    unit: "km",
+                },
+            });
+        } else if (sort === "name-asc") {
             esSort.push({ "name.keyword": { order: "asc" } });
         } else if (sort === "name-desc") {
             esSort.push({ "name.keyword": { order: "desc" } });
@@ -111,19 +136,42 @@ export async function searchHospitals(req: Request, res: Response) {
             esSort.push({ "name.keyword": { order: "asc" } });
         }
 
+        // ── Build search body ─────────────────────────────────────────────────
+        const searchBody: any = {
+            query: esQuery,
+            sort: esSort,
+            from,
+            size: limit,
+            track_total_hits: true,
+        };
+
+        // Add script field for distance if user location provided
+        if (userLat != null && userLon != null) {
+            searchBody.script_fields = {
+                distance_km: {
+                    script: {
+                        source: "if (doc['location'].size() == 0) return null; return doc['location'].arcDistance(params.lat, params.lon) / 1000",
+                        params: { lat: userLat, lon: userLon },
+                    },
+                },
+            };
+            searchBody._source = true;
+        }
+
         // ── Execute search ────────────────────────────────────────────────────
         const esResult = await es.search({
             index: HOSPITAL_INDEX,
-            body: {
-                query: esQuery,
-                sort: esSort,
-                from,
-                size: limit,
-                track_total_hits: true,
-            },
+            body: searchBody,
         });
 
-        const hits = esResult.hits.hits.map((hit: any) => hit._source);
+        const hits = esResult.hits.hits.map((hit: any) => {
+            const source = hit._source;
+            const distVal = hit.fields?.distance_km?.[0];
+            if (distVal != null) {
+                source._distance_km = Math.round(distVal * 10) / 10;
+            }
+            return source;
+        });
         const total =
             typeof esResult.hits.total === "number"
                 ? esResult.hits.total
