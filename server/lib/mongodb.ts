@@ -9,7 +9,11 @@ export async function getMongoDb(): Promise<Db> {
     const uri = process.env.MONGO_URI;
     if (!uri) throw new Error("MONGO_URI is not set");
 
-    client = new MongoClient(uri);
+    client = new MongoClient(uri, {
+        serverSelectionTimeoutMS: 15000,
+        connectTimeoutMS: 15000,
+        socketTimeoutMS: 30000,
+    });
     await client.connect();
     db = client.db("hospital_data");
     return db;

@@ -8,12 +8,12 @@
     "build": "tsc",
     "start": "node ./dist/server.js",
     "dev": "nodemon",
-    "sync:mongo": "tsx server/scripts/sync-es.ts",
+    "sync:es": "tsx server/scripts/sync-es.ts",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
     "prisma": "prisma migrage dev && prisma generate",
     "auth:generate": "pnpm dlx auth@latest generate --config ./server/lib/auth.ts",
-    "docker:es": "docker run -d -p 9200: 9200 -e 'discovery.type=single-node' -e'xpack.security.enabled=false' elasticsearch: 8.17.0"
+    "docker:es": "docker run -d -p 9200:9200 -e discovery.type=single-node -e xpack.security.enabled=false elasticsearch:8.17.0"
   },
   "keywords": [],
   "author": "",
