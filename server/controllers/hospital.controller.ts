@@ -96,11 +96,18 @@ export async function compareHospitals(req: Request, res: Response) {
         const idsParam = req.query.ids as string;
         if (!idsParam) return res.status(400).json({ error: "ids parameter required" });
 
-        const ids = idsParam.split(",").map(Number).filter((n) => !isNaN(n)).slice(0, 5);
+        // Accept both HOSP00001 format and plain numeric Sr_No
+        const ids = idsParam
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, 5)
+            .map((s) => (/^HOSP/i.test(s) ? parseInt(s.replace(/^HOSP0*/i, "") || "0", 10) : Number(s)))
+            .filter((n) => !isNaN(n) && n > 0);
         if (!ids.length) return res.status(400).json({ error: "Invalid IDs" });
 
         const redis = getRedis();
-        const cacheKey = `compare:${ids.sort().join(",")}`;
+        const cacheKey = `compare:${[...ids].sort((a, b) => a - b).join(",")}`;
         const cached = await redis.get<string>(cacheKey);
         if (cached) {
             return res.json(typeof cached === "string" ? JSON.parse(cached) : cached);
@@ -123,7 +130,7 @@ export async function compareHospitals(req: Request, res: Response) {
 
         const response = {
             hospitals: hospitals.map((h) => ({
-                id: h.Sr_No,
+                id: `HOSP${String(h.Sr_No).padStart(5, "0")}`,
                 name: h.Hospital_Name,
                 state: h.State,
                 district: h.District,
