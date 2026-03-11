@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { getHospitalCollection } from "../lib/mongodb.js";
+import { getElasticClient, HOSPITAL_INDEX } from "../lib/elastic.js";
 import { getRedis } from "../lib/redis.js";
 import crypto from "crypto";
 
@@ -42,11 +42,14 @@ export async function searchHospitals(req: Request, res: Response) {
             page: pageStr = "1",
             limit: limitStr = "12",
             sort = "relevance",
+            lat,
+            lon,
+            distance,
         } = req.query as SearchQuery;
 
         const page = Math.max(1, parseInt(pageStr) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(limitStr) || 12));
-        const skip = (page - 1) * limit;
+        const from = (page - 1) * limit;
 
         // Check Redis cache
         const redis = getRedis();
@@ -58,92 +61,146 @@ export async function searchHospitals(req: Request, res: Response) {
             return res.json(parsed);
         }
 
-        const collection = await getHospitalCollection();
+        const es = getElasticClient();
 
-        // Build MongoDB filter
-        const mongoFilter: Record<string, any> = {};
+        const userLat = lat ? parseFloat(lat) : null;
+        const userLon = lon ? parseFloat(lon) : null;
+        const distKm = distance ? parseFloat(distance) : null;
+
+        // ── Build Elasticsearch query ─────────────────────────────────────────
+        const must: any[] = [];
+        const filter: any[] = [];
 
         if (q && q.trim()) {
-            // Use $text search if index is available, fall back to $regex across key fields
-            mongoFilter.$or = [
-                { Hospital_Name: { $regex: q.trim(), $options: "i" } },
-                { Location: { $regex: q.trim(), $options: "i" } },
-                { Address_Original_First_Line: { $regex: q.trim(), $options: "i" } },
-                { State: { $regex: q.trim(), $options: "i" } },
-                { District: { $regex: q.trim(), $options: "i" } },
-            ];
+            must.push({
+                multi_match: {
+                    query: q.trim(),
+                    fields: [
+                        "name^3",
+                        "city^2",
+                        "address",
+                        "state",
+                        "district",
+                        "specialties",
+                    ],
+                    fuzziness: "AUTO",
+                    prefix_length: 1,
+                    type: "best_fields",
+                },
+            });
         }
 
-        if (state) {
-            mongoFilter.State = { $regex: `^${state}$`, $options: "i" };
-        }
-        if (district) {
-            mongoFilter.District = { $regex: `^${district}$`, $options: "i" };
-        }
+        if (state) filter.push({ term: { state } });
+        if (district) filter.push({ term: { district } });
         if (pincode) {
             const pin = parseInt(pincode, 10);
-            if (!isNaN(pin)) mongoFilter.Pincode = pin;
+            if (!isNaN(pin)) filter.push({ term: { pincode: pin } });
         }
 
-        // Build sort
-        const mongoSort: Record<string, 1 | -1> = {};
-        switch (sort) {
-            case "name-asc":
-                mongoSort.Hospital_Name = 1;
-                break;
-            case "name-desc":
-                mongoSort.Hospital_Name = -1;
-                break;
-            default:
-                // relevance: sort by name ascending as default stable sort
-                mongoSort.Sr_No = 1;
-                break;
+        // Geo distance filter
+        if (userLat != null && userLon != null && distKm != null) {
+            filter.push({
+                geo_distance: {
+                    distance: `${distKm}km`,
+                    location: { lat: userLat, lon: userLon },
+                },
+            });
         }
 
-        const [results, total] = await Promise.all([
-            collection.find(mongoFilter).sort(mongoSort).skip(skip).limit(limit).toArray(),
-            collection.countDocuments(mongoFilter),
-        ]);
-
-        const totalPages = Math.max(1, Math.ceil(total / limit));
-
-        // Facet aggregations (distinct states and districts matching the current filter)
-        const facetFilter: Record<string, any> = {};
-        if (state) facetFilter.State = mongoFilter.State;
-        if (district) facetFilter.District = mongoFilter.District;
-
-        const [stateAgg, districtAgg] = await Promise.all([
-            collection
-                .aggregate([
-                    { $group: { _id: "$State", count: { $sum: 1 } } },
-                    { $sort: { _id: 1 } },
-                    { $limit: 50 },
-                ])
-                .toArray(),
-            collection
-                .aggregate([
-                    ...(state ? [{ $match: { State: mongoFilter.State } }] : []),
-                    { $group: { _id: "$District", count: { $sum: 1 } } },
-                    { $sort: { _id: 1 } },
-                    { $limit: 200 },
-                ])
-                .toArray(),
-        ]);
-
-        const facets = {
-            states: stateAgg
-                .filter((b) => b._id)
-                .map((b) => ({ value: b._id as string, count: b.count as number })),
-            districts: districtAgg
-                .filter((b) => b._id)
-                .map((b) => ({ value: b._id as string, count: b.count as number })),
+        const esQuery: any = {
+            bool: {
+                ...(must.length > 0 ? { must } : { must: [{ match_all: {} }] }),
+                ...(filter.length > 0 ? { filter } : {}),
+            },
         };
 
-        // Strip MongoDB _id from results
-        const sanitized = results.map(({ _id, ...rest }) => rest);
+        // ── Sort ──────────────────────────────────────────────────────────────
+        const esSort: any[] = [];
+        if (sort === "distance" && userLat != null && userLon != null) {
+            esSort.push({
+                _geo_distance: {
+                    location: { lat: userLat, lon: userLon },
+                    order: "asc",
+                    unit: "km",
+                },
+            });
+        } else if (sort === "name-asc") {
+            esSort.push({ "name.keyword": { order: "asc" } });
+        } else if (sort === "name-desc") {
+            esSort.push({ "name.keyword": { order: "desc" } });
+        } else if (sort === "rating") {
+            esSort.push({ rating: { order: "desc" } });
+        } else if (q && q.trim()) {
+            esSort.push({ _score: { order: "desc" } });
+        } else {
+            esSort.push({ "name.keyword": { order: "asc" } });
+        }
+
+        // ── Build search body ─────────────────────────────────────────────────
+        const searchBody: any = {
+            query: esQuery,
+            sort: esSort,
+            from,
+            size: limit,
+            track_total_hits: true,
+        };
+
+        // Add script field for distance if user location provided
+        if (userLat != null && userLon != null) {
+            searchBody.script_fields = {
+                distance_km: {
+                    script: {
+                        source: "if (doc['location'].size() == 0) return null; return doc['location'].arcDistance(params.lat, params.lon) / 1000",
+                        params: { lat: userLat, lon: userLon },
+                    },
+                },
+            };
+            searchBody._source = true;
+        }
+
+        // ── Execute search ────────────────────────────────────────────────────
+        const esResult = await es.search({
+            index: HOSPITAL_INDEX,
+            body: searchBody,
+        });
+
+        const hits = esResult.hits.hits.map((hit: any) => {
+            const source = hit._source;
+            const distVal = hit.fields?.distance_km?.[0];
+            if (distVal != null) {
+                source._distance_km = Math.round(distVal * 10) / 10;
+            }
+            return source;
+        });
+        const total =
+            typeof esResult.hits.total === "number"
+                ? esResult.hits.total
+                : (esResult.hits.total as any)?.value ?? 0;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+
+        // ── Sidebar facets from Elasticsearch aggregations ────────────────────
+        const facetResult = await es.search({
+            index: HOSPITAL_INDEX,
+            body: {
+                size: 0,
+                ...(state ? { query: { term: { state } } } : {}),
+                aggs: {
+                    states: { terms: { field: "state", size: 50 } },
+                    districts: { terms: { field: "district", size: 200 } },
+                },
+            },
+        });
+
+        const statesBuckets = (facetResult.aggregations?.states as any)?.buckets ?? [];
+        const districtsBuckets = (facetResult.aggregations?.districts as any)?.buckets ?? [];
+
+        const facets = {
+            states: statesBuckets.map((b: any) => ({ value: b.key, count: b.doc_count })),
+            districts: districtsBuckets.map((b: any) => ({ value: b.key, count: b.doc_count })),
+        };
 
         const response = {
-            results: sanitized,
+            results: hits,
             total,
             page,
             limit,
@@ -176,22 +233,30 @@ export async function getAutoSuggestions(req: Request, res: Response) {
             return res.json(parsed);
         }
 
-        const collection = await getHospitalCollection();
+        const es = getElasticClient();
 
-        const results = await collection
-            .find(
-                { Hospital_Name: { $regex: q.trim(), $options: "i" } },
-                { projection: { Hospital_Name: 1, State: 1, District: 1, Pincode: 1, _id: 0 } }
-            )
-            .limit(10)
-            .toArray();
+        const esResult = await es.search({
+            index: HOSPITAL_INDEX,
+            body: {
+                query: {
+                    multi_match: {
+                        query: q.trim(),
+                        fields: ["name^3", "city", "state", "district"],
+                        fuzziness: "AUTO",
+                        prefix_length: 1,
+                    },
+                },
+                _source: ["name", "state", "district", "pincode"],
+                size: 10,
+            },
+        });
 
         const response = {
-            suggestions: results.map((r) => ({
-                name: r.Hospital_Name,
-                state: r.State,
-                district: r.District,
-                pincode: r.Pincode,
+            suggestions: esResult.hits.hits.map((hit: any) => ({
+                name: hit._source.name,
+                state: hit._source.state,
+                district: hit._source.district,
+                pincode: hit._source.pincode,
             })),
         };
 
@@ -215,24 +280,28 @@ export async function getFacets(req: Request, res: Response) {
             return res.json(parsed);
         }
 
-        const collection = await getHospitalCollection();
+        const es = getElasticClient();
 
-        const [stateAgg, totalHospitals] = await Promise.all([
-            collection
-                .aggregate([
-                    { $group: { _id: "$State", count: { $sum: 1 } } },
-                    { $sort: { _id: 1 } },
-                    { $limit: 50 },
-                ])
-                .toArray(),
-            collection.countDocuments({}),
-        ]);
+        const esResult = await es.search({
+            index: HOSPITAL_INDEX,
+            body: {
+                size: 0,
+                track_total_hits: true,
+                aggs: {
+                    states: { terms: { field: "state", size: 50 } },
+                },
+            },
+        });
+
+        const statesBuckets = (esResult.aggregations?.states as any)?.buckets ?? [];
+        const total =
+            typeof esResult.hits.total === "number"
+                ? esResult.hits.total
+                : (esResult.hits.total as any)?.value ?? 0;
 
         const response = {
-            states: stateAgg
-                .filter((b) => b._id)
-                .map((b) => ({ value: b._id as string, count: b.count as number })),
-            totalHospitals,
+            states: statesBuckets.map((b: any) => ({ value: b.key, count: b.doc_count })),
+            totalHospitals: total,
         };
 
         await redis.set(cacheKey, JSON.stringify(response), { ex: 600 });
@@ -243,4 +312,5 @@ export async function getFacets(req: Request, res: Response) {
         return res.status(500).json({ error: 1, message: "Facets failed" });
     }
 }
+
 

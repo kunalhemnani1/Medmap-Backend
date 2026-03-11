@@ -8,12 +8,16 @@
     "build": "tsc",
     "start": "node ./dist/server.js",
     "dev": "nodemon",
-    "sync:mongo": "tsx server/scripts/sync-es.ts",
+    "sync:es": "tsx server/scripts/sync-es.ts",
+    "sync:mongo": "tsx server/scripts/sync-mongo.ts",
+    "sync:all": "tsx server/scripts/sync-mongo.ts && tsx server/scripts/sync-es.ts",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
-    "prisma": "prisma migrage dev && prisma generate",
+    "prisma": "prisma migrate dev && prisma generate",
     "auth:generate": "pnpm dlx auth@latest generate --config ./server/lib/auth.ts",
-    "docker:es": "docker run -d -p 9200: 9200 -e 'discovery.type=single-node' -e'xpack.security.enabled=false' elasticsearch: 8.17.0"
+    "docker:es": "docker run -d -p 9200:9200 -e discovery.type=single-node -e xpack.security.enabled=false elasticsearch:8.17.0",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +30,7 @@
     "better-auth": "^1.5.4",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.3.1",
     "mongodb": "^7.1.0",
     "pg": "^8.20.0"
   },
@@ -34,10 +39,13 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/morgan": "^1.9.10",
+    "@types/supertest": "^7.2.0",
     "dotenv": "^17.3.1",
     "morgan": "^1.10.1",
     "nodemon": "^3.1.14",
     "prisma": "^7.4.2",
-    "tsx": "^4.21.0"
+    "supertest": "^7.2.2",
+    "tsx": "^4.21.0",
+    "vitest": "^4.0.18"
   }
 }

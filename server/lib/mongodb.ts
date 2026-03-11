@@ -9,13 +9,21 @@ export async function getMongoDb(): Promise<Db> {
     const uri = process.env.MONGO_URI;
     if (!uri) throw new Error("MONGO_URI is not set");
 
-    client = new MongoClient(uri);
+    client = new MongoClient(uri, {
+        serverSelectionTimeoutMS: 15000,
+        connectTimeoutMS: 15000,
+        socketTimeoutMS: 30000,
+    });
     await client.connect();
-    db = client.db("hospital_data");
+    db = client.db("medmap");
     return db;
 }
 
-export async function getHospitalCollection(): Promise<Collection> {
+export async function getCollection(name: string): Promise<Collection> {
     const database = await getMongoDb();
-    return database.collection("hospital");
+    return database.collection(name);
+}
+
+export async function getHospitalCollection(): Promise<Collection> {
+    return getCollection("hospitals");
 }
