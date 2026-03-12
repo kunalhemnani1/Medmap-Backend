@@ -17,7 +17,12 @@ export async function getReviews(req: Request, res: Response) {
         const skip = (page - 1) * limit;
 
         const filter: any = {};
-        if (hospital_id) filter.Hospital_Id = parseInt(hospital_id, 10);
+        if (hospital_id) {
+            const raw = hospital_id.toUpperCase().startsWith("HOSP")
+                ? hospital_id.slice(4).replace(/^0+/, "") || "0"
+                : hospital_id;
+            filter.Hospital_Id = parseInt(raw, 10);
+        }
         if (rating) filter.Rating = { $gte: parseInt(rating, 10) };
 
         const sortObj: any = sort === "rating" ? { Rating: -1 } : { Review_Date: -1 };

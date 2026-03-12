@@ -18,7 +18,12 @@ export async function getBookings(req: Request, res: Response) {
 
         const filter: any = {};
         if (user_id) filter.User_Id = user_id;
-        if (hospital_id) filter.Hospital_Id = parseInt(hospital_id, 10);
+        if (hospital_id) {
+            const raw = hospital_id.toUpperCase().startsWith("HOSP")
+                ? hospital_id.slice(4).replace(/^0+/, "") || "0"
+                : hospital_id;
+            filter.Hospital_Id = parseInt(raw, 10);
+        }
         if (status) filter.Status = status;
 
         const coll = await getCollection("bookings");

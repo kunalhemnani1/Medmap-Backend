@@ -4,7 +4,12 @@ import { getRedis } from "../lib/redis.js";
 
 export async function getHospitalById(req: Request, res: Response) {
     try {
-        const id = parseInt(req.params.id, 10);
+        // Accept both "HOSP00042" (from Elasticsearch) and plain "42"
+        const raw = req.params.id as string;
+        const numeric = raw.toUpperCase().startsWith("HOSP")
+            ? raw.slice(4).replace(/^0+/, "") || "0"
+            : raw;
+        const id = parseInt(numeric, 10);
         if (isNaN(id)) return res.status(400).json({ error: "Invalid hospital ID" });
 
         const redis = getRedis();
