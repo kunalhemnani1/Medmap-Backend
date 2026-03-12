@@ -14,19 +14,21 @@ datasource db {
 }
 
 model User {
-  id            String               @id @default(uuid())
-  name          String
-  email         String               @unique
-  createdAt     DateTime             @default(now())
-  emailVerified Boolean              @default(false)
-  image         String?
-  updatedAt     DateTime             @updatedAt
-  sessions      Session[]
-  accounts      Account[]
-  bookmarks     Bookmark[]
-  hospitals     RegisteredHospital[]
-  appointments  Appointment[]        @relation("PatientAppointments")
-  reviews       HospitalReview[]     @relation("UserReviews")
+  id             String               @id @default(uuid())
+  name           String
+  email          String               @unique
+  createdAt      DateTime             @default(now())
+  emailVerified  Boolean              @default(false)
+  image          String?
+  updatedAt      DateTime             @updatedAt
+  sessions       Session[]
+  accounts       Account[]
+  bookmarks      Bookmark[]
+  hospitals      RegisteredHospital[]
+  appointments   Appointment[]        @relation("PatientAppointments")
+  reviews        HospitalReview[]     @relation("UserReviews")
+  doctorProfiles HospitalDoctor[]     @relation("DoctorProfile")
+  doctorRequests DoctorRequest[]
 
   role String? @default("user")
 
@@ -121,6 +123,7 @@ model RegisteredHospital {
   prices             HospitalPrice[]
   appointments       Appointment[]
   reviews            HospitalReview[]
+  doctorRequests     DoctorRequest[]
 
   @@index([ownerId])
   @@index([state, city])
@@ -128,26 +131,31 @@ model RegisteredHospital {
 }
 
 model HospitalDoctor {
-  id              String             @id @default(uuid())
-  hospitalId      String
-  hospital        RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
-  name            String
-  qualification   String
-  specialty       String
-  subSpecialty    String?
-  experienceYears Int                @default(0)
-  consultationFee Int                @default(500)
-  availableDays   String             @default("Mon,Tue,Wed,Thu,Fri")
-  availableFrom   String             @default("09:00")
-  availableTo     String             @default("17:00")
-  maxSlotsPerDay  Int                @default(20)
-  phone           String?
-  isActive        Boolean            @default(true)
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  appointments    Appointment[]
+  id               String             @id @default(uuid())
+  hospitalId       String
+  hospital         RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  userId           String?
+  user             User?              @relation("DoctorProfile", fields: [userId], references: [id], onDelete: SetNull)
+  name             String
+  email            String?
+  qualification    String
+  specialty        String
+  subSpecialty     String?
+  experienceYears  Int                @default(0)
+  consultationFee  Int                @default(500)
+  availableDays    String             @default("Mon,Tue,Wed,Thu,Fri")
+  availableFrom    String             @default("09:00")
+  availableTo      String             @default("17:00")
+  maxSlotsPerDay   Int                @default(20)
+  phone            String?
+  acceptedByDoctor Boolean            @default(false) // 3-way handshake: admin adds, doctor accepts
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  appointments     Appointment[]
 
   @@index([hospitalId])
+  @@index([userId])
   @@map("hospital_doctor")
 }
 
@@ -196,20 +204,79 @@ model Appointment {
 }
 
 model HospitalReview {
-  id         String             @id @default(uuid())
-  hospitalId String
-  hospital   RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
-  authorId   String
-  author     User               @relation("UserReviews", fields: [authorId], references: [id], onDelete: Cascade)
-  authorName String
-  rating     Int
-  title      String?
-  comment    String
-  visitDate  DateTime?
-  createdAt  DateTime           @default(now())
-  updatedAt  DateTime           @updatedAt
+  id                  String             @id @default(uuid())
+  hospitalId          String
+  hospital            RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  authorId            String
+  author              User               @relation("UserReviews", fields: [authorId], references: [id], onDelete: Cascade)
+  authorName          String
+  appointmentId       String? // links review to a real visit
+  // Multi-category ratings (1-5)
+  ratingWaiting       Int                @default(3)
+  ratingCommunication Int                @default(3)
+  ratingStaff         Int                @default(3)
+  ratingCleanliness   Int                @default(3)
+  ratingOverall       Int                @default(3)
+  rating              Int // legacy / computed average
+  title               String?
+  comment             String
+  visitDate           DateTime?
+  phone               String?
+  // Verification
+  isVerifiedVisit     Boolean            @default(false) // matched to an appointment
+  reviewToken         String? // token used for verification
+  // Fake detection
+  ipAddress           String?
+  userAgent           String?
+  isFlagged           Boolean            @default(false)
+  flagReason          String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 
   @@index([hospitalId])
   @@index([authorId])
+  @@index([appointmentId])
   @@map("hospital_review")
+}
+
+// ── Doctor Registration Requests ────────────────────────────────────────────
+
+model DoctorRequest {
+  id            String             @id @default(uuid())
+  hospitalId    String
+  hospital      RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  requesterId   String
+  requester     User               @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  name          String
+  email         String
+  phone         String?
+  qualification String
+  specialty     String
+  medicalRegNo  String // doctor's ID / registration number
+  documentUrl   String? // uploaded identification document
+  status        String             @default("pending") // pending | approved | rejected
+  adminNotes    String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([hospitalId])
+  @@index([requesterId])
+  @@map("doctor_request")
+}
+
+// ── Review Token (generated after appointment completion) ───────────────────
+
+model ReviewToken {
+  id            String   @id @default(uuid())
+  appointmentId String   @unique
+  patientId     String
+  hospitalId    String
+  token         String   @unique
+  used          Boolean  @default(false)
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([token])
+  @@index([patientId])
+  @@map("review_token")
 }

@@ -7,6 +7,10 @@ import {
     createReview, listReviews,
     listDoctorAppointments,
     adminListHospitals, adminVerifyHospital, adminListAppointments,
+    submitDoctorRequest, adminListDoctorRequests, adminDecideDoctorRequest,
+    listMyDoctorInvites, acceptDoctorInvite,
+    getReviewToken,
+    adminListFlaggedReviews, adminDeleteReview, adminUnflagReview,
 } from "../controllers/registered-hospital.controller.js";
 
 const router = Router();
@@ -42,10 +46,23 @@ router.get("/doctor/appointments", listDoctorAppointments);
 // Reviews
 router.get("/registered-hospitals/:id/reviews", listReviews);
 router.post("/hospital-reviews", createReview);
+router.get("/review-token", getReviewToken);
+
+// Doctor registration requests
+router.post("/doctor-requests", submitDoctorRequest);
+
+// Doctor invites (3-way handshake acceptance)
+router.get("/doctor/invites", listMyDoctorInvites);
+router.patch("/doctor/invites/:doctorId", acceptDoctorInvite);
 
 // Admin routes
 router.get("/admin/hospitals", adminListHospitals);
 router.patch("/admin/hospitals/:id/verify", adminVerifyHospital);
 router.get("/admin/appointments", adminListAppointments);
+router.get("/admin/doctor-requests", adminListDoctorRequests);
+router.patch("/admin/doctor-requests/:id", adminDecideDoctorRequest);
+router.get("/admin/reviews/flagged", adminListFlaggedReviews);
+router.delete("/admin/reviews/:id", adminDeleteReview);
+router.patch("/admin/reviews/:id/unflag", adminUnflagReview);
 
 export default router;

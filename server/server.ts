@@ -62,11 +62,14 @@ app.use("/api", medicationRouter);
 app.use("/api", bookingRouter);
 app.use("/api", bookmarkRouter);
 app.use("/api", registeredHospitalRouter);
+app.get("/test", (req, res) => {
+    res.json({ message: "API working" })
+})
 
 
 
 if (process.env.NODE_ENV !== "test") {
-    app.listen(port, () => {
+    app.listen(port, "0.0.0.0", () => {
         console.log(`Server is running on port ${port}`);
     });
 }

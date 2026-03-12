@@ -1,4 +1,5 @@
 ﻿import { Request, Response } from "express";
+import crypto from "crypto";
 import prisma from "../lib/prisma.js";
 import { auth } from "../lib/auth.js";
 import { fromNodeHeaders } from "better-auth/node";
@@ -138,13 +139,19 @@ export async function addDoctor(req: Request, res: Response) {
         if (!user) return res.status(401).json({ error: "Unauthorized" });
         const hospital = await prisma.registeredHospital.findUnique({ where: { id: hospitalId } });
         if (!hospital) return res.status(404).json({ error: "Hospital not found" });
-        if (hospital.ownerId !== user.id) return res.status(403).json({ error: "Forbidden" });
-        const { name, qualification, specialty, subSpecialty, experienceYears, consultationFee, availableDays, availableFrom, availableTo, maxSlotsPerDay, phone } = req.body as Record<string, string>;
+        if (hospital.ownerId !== user.id && (user as any).role !== "admin") return res.status(403).json({ error: "Forbidden" });
+        const { name, email, qualification, specialty, subSpecialty, experienceYears, consultationFee, availableDays, availableFrom, availableTo, maxSlotsPerDay, phone } = req.body as Record<string, string>;
         if (!name || !qualification || !specialty) {
             return res.status(400).json({ error: "Missing required: name, qualification, specialty" });
         }
+        // Look up the user by email to link
+        let userId: string | null = null;
+        if (email) {
+            const linkedUser = await prisma.user.findUnique({ where: { email } });
+            if (linkedUser) userId = linkedUser.id;
+        }
         const doctor = await prisma.hospitalDoctor.create({
-            data: { hospitalId, name, qualification, specialty, subSpecialty: subSpecialty || null, experienceYears: parseInt(experienceYears) || 0, consultationFee: parseInt(consultationFee) || 500, availableDays: availableDays || "Mon,Tue,Wed,Thu,Fri", availableFrom: availableFrom || "09:00", availableTo: availableTo || "17:00", maxSlotsPerDay: parseInt(maxSlotsPerDay) || 20, phone: phone || null },
+            data: { hospitalId, name, email: email || null, userId, qualification, specialty, subSpecialty: subSpecialty || null, experienceYears: parseInt(experienceYears) || 0, consultationFee: parseInt(consultationFee) || 500, availableDays: availableDays || "Mon,Tue,Wed,Thu,Fri", availableFrom: availableFrom || "09:00", availableTo: availableTo || "17:00", maxSlotsPerDay: parseInt(maxSlotsPerDay) || 20, phone: phone || null, acceptedByDoctor: false },
         });
         return res.status(201).json(doctor);
     } catch (err) {
@@ -319,6 +326,24 @@ export async function updateAppointmentStatus(req: Request, res: Response) {
         if (!validStatuses.includes(status)) return res.status(400).json({ error: "Invalid status" });
 
         const updated = await prisma.appointment.update({ where: { id: appointmentId }, data: { status } });
+
+        // Generate review token when appointment is marked completed
+        if (status === "completed") {
+            const existingToken = await prisma.reviewToken.findUnique({ where: { appointmentId } });
+            if (!existingToken) {
+                const token = crypto.randomBytes(32).toString("hex");
+                await prisma.reviewToken.create({
+                    data: {
+                        appointmentId,
+                        patientId: appt.patientId,
+                        hospitalId: appt.hospitalId,
+                        token,
+                        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+                    },
+                });
+            }
+        }
+
         return res.json(updated);
     } catch (err) {
         console.error("updateAppointmentStatus error:", err);
@@ -330,14 +355,60 @@ export async function createReview(req: Request, res: Response) {
     try {
         const user = await getSessionUser(req);
         if (!user) return res.status(401).json({ error: "Unauthorized" });
-        const { hospitalId, rating, title, comment, visitDate } = req.body as Record<string, string>;
-        if (!hospitalId || !rating || !comment) {
-            return res.status(400).json({ error: "Missing required: hospitalId, rating, comment" });
+        const { hospitalId, ratingWaiting, ratingCommunication, ratingStaff, ratingCleanliness, ratingOverall, title, comment, visitDate, phone, reviewToken } = req.body as Record<string, string>;
+        if (!hospitalId || !ratingOverall || !comment) {
+            return res.status(400).json({ error: "Missing required: hospitalId, ratingOverall, comment" });
         }
-        const ratingNum = parseInt(rating);
-        if (ratingNum < 1 || ratingNum > 5) return res.status(400).json({ error: "Rating must be 1-5" });
+        const rW = Math.min(5, Math.max(1, parseInt(ratingWaiting) || 3));
+        const rC = Math.min(5, Math.max(1, parseInt(ratingCommunication) || 3));
+        const rS = Math.min(5, Math.max(1, parseInt(ratingStaff) || 3));
+        const rCl = Math.min(5, Math.max(1, parseInt(ratingCleanliness) || 3));
+        const rO = Math.min(5, Math.max(1, parseInt(ratingOverall) || 3));
+        const avgRating = Math.round((rW + rC + rS + rCl + rO) / 5);
+
+        // Verify review token if provided
+        let isVerifiedVisit = false;
+        let appointmentId: string | null = null;
+        if (reviewToken) {
+            const token = await prisma.reviewToken.findUnique({ where: { token: reviewToken } });
+            if (token && !token.used && token.patientId === user.id && token.hospitalId === hospitalId && new Date() < token.expiresAt) {
+                isVerifiedVisit = true;
+                appointmentId = token.appointmentId;
+                await prisma.reviewToken.update({ where: { id: token.id }, data: { used: true } });
+            }
+        }
+
+        // Fake detection: check for same IP/user-agent submitting multiple reviews recently
+        const ip = req.ip || req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() || null;
+        const ua = req.headers["user-agent"] || null;
+        let isFlagged = false;
+        let flagReason: string | null = null;
+        if (ip) {
+            const recentFromIp = await prisma.hospitalReview.count({
+                where: { ipAddress: ip, createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
+            });
+            if (recentFromIp >= 3) {
+                isFlagged = true;
+                flagReason = `Multiple reviews from same IP (${recentFromIp + 1} in last hour)`;
+            }
+        }
+        // Also check same user posting to same hospital
+        const existingUserReview = await prisma.hospitalReview.findFirst({
+            where: { authorId: user.id, hospitalId },
+        });
+        if (existingUserReview) {
+            return res.status(409).json({ error: "You have already reviewed this hospital" });
+        }
+
         const review = await prisma.hospitalReview.create({
-            data: { hospitalId, authorId: user.id, authorName: user.name, rating: ratingNum, title: title || null, comment, visitDate: visitDate ? new Date(visitDate) : null },
+            data: {
+                hospitalId, authorId: user.id, authorName: user.name, appointmentId,
+                ratingWaiting: rW, ratingCommunication: rC, ratingStaff: rS, ratingCleanliness: rCl, ratingOverall: rO,
+                rating: avgRating, title: title || null, comment, phone: phone || null,
+                visitDate: visitDate ? new Date(visitDate) : null,
+                isVerifiedVisit, reviewToken: reviewToken || null,
+                ipAddress: ip, userAgent: ua, isFlagged, flagReason,
+            },
         });
         return res.status(201).json(review);
     } catch (err) {
@@ -444,5 +515,185 @@ export async function adminListAppointments(req: Request, res: Response) {
     } catch (err) {
         console.error("adminListAppointments error:", err);
         return res.status(500).json({ error: "Failed to fetch appointments" });
+    }
+}
+
+// ─── Doctor Registration Requests ────────────────────────────────────────────
+
+export async function submitDoctorRequest(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const { hospitalId, name, email, phone, qualification, specialty, medicalRegNo, documentUrl } = req.body as Record<string, string>;
+        if (!hospitalId || !name || !email || !qualification || !specialty || !medicalRegNo) {
+            return res.status(400).json({ error: "Missing required fields" });
+        }
+        const hospital = await prisma.registeredHospital.findUnique({ where: { id: hospitalId } });
+        if (!hospital) return res.status(404).json({ error: "Hospital not found" });
+        // Check duplicate
+        const existing = await prisma.doctorRequest.findFirst({
+            where: { requesterId: user.id, hospitalId, status: "pending" },
+        });
+        if (existing) return res.status(409).json({ error: "You already have a pending request for this hospital" });
+        const request = await prisma.doctorRequest.create({
+            data: { hospitalId, requesterId: user.id, name, email, phone: phone || null, qualification, specialty, medicalRegNo, documentUrl: documentUrl || null },
+        });
+        return res.status(201).json(request);
+    } catch (err) {
+        console.error("submitDoctorRequest error:", err);
+        return res.status(500).json({ error: "Failed to submit request" });
+    }
+}
+
+export async function adminListDoctorRequests(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user || (user as any).role !== "admin") return res.status(403).json({ error: "Admin only" });
+        const { status } = req.query as Record<string, string>;
+        const where: Record<string, unknown> = {};
+        if (status) where.status = status;
+        const requests = await prisma.doctorRequest.findMany({
+            where, orderBy: { createdAt: "desc" },
+            include: {
+                hospital: { select: { id: true, name: true, city: true, state: true } },
+                requester: { select: { id: true, name: true, email: true } },
+            },
+        });
+        return res.json({ requests });
+    } catch (err) {
+        console.error("adminListDoctorRequests error:", err);
+        return res.status(500).json({ error: "Failed to fetch requests" });
+    }
+}
+
+export async function adminDecideDoctorRequest(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user || (user as any).role !== "admin") return res.status(403).json({ error: "Admin only" });
+        const id = str(req.params.id);
+        const { decision, adminNotes } = req.body as { decision: string; adminNotes?: string };
+        if (!["approved", "rejected"].includes(decision)) return res.status(400).json({ error: "Invalid decision" });
+        const request = await prisma.doctorRequest.findUnique({ where: { id }, include: { requester: true } });
+        if (!request) return res.status(404).json({ error: "Request not found" });
+        const updated = await prisma.doctorRequest.update({ where: { id }, data: { status: decision, adminNotes: adminNotes || null } });
+        // On approval, auto-create the HospitalDoctor entry (acceptedByDoctor=false, doctor must accept)
+        if (decision === "approved") {
+            await prisma.hospitalDoctor.create({
+                data: {
+                    hospitalId: request.hospitalId,
+                    userId: request.requesterId,
+                    name: request.name,
+                    email: request.email,
+                    qualification: request.qualification,
+                    specialty: request.specialty,
+                    phone: request.phone,
+                    acceptedByDoctor: false,
+                },
+            });
+        }
+        return res.json(updated);
+    } catch (err) {
+        console.error("adminDecideDoctorRequest error:", err);
+        return res.status(500).json({ error: "Failed to update request" });
+    }
+}
+
+// ─── Doctor acceptance (3-way handshake) ────────────────────────────────────
+
+export async function listMyDoctorInvites(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const invites = await prisma.hospitalDoctor.findMany({
+            where: { userId: user.id, acceptedByDoctor: false, isActive: true },
+            include: { hospital: { select: { id: true, name: true, city: true, state: true } } },
+        });
+        return res.json({ invites });
+    } catch (err) {
+        console.error("listMyDoctorInvites error:", err);
+        return res.status(500).json({ error: "Failed to fetch invites" });
+    }
+}
+
+export async function acceptDoctorInvite(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const id = str(req.params.doctorId);
+        const doctor = await prisma.hospitalDoctor.findUnique({ where: { id } });
+        if (!doctor || doctor.userId !== user.id) return res.status(403).json({ error: "Forbidden" });
+        const { accept } = req.body as { accept: boolean };
+        if (accept) {
+            await prisma.hospitalDoctor.update({ where: { id }, data: { acceptedByDoctor: true } });
+        } else {
+            await prisma.hospitalDoctor.update({ where: { id }, data: { isActive: false } });
+        }
+        return res.json({ success: true });
+    } catch (err) {
+        console.error("acceptDoctorInvite error:", err);
+        return res.status(500).json({ error: "Failed to process invite" });
+    }
+}
+
+// ─── Review Token lookup (patient checks if they have a token for a hospital) ─
+
+export async function getReviewToken(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const { hospitalId } = req.query as { hospitalId: string };
+        if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+        const token = await prisma.reviewToken.findFirst({
+            where: { patientId: user.id, hospitalId, used: false, expiresAt: { gt: new Date() } },
+            orderBy: { createdAt: "desc" },
+        });
+        return res.json({ token: token?.token || null, appointmentId: token?.appointmentId || null });
+    } catch (err) {
+        console.error("getReviewToken error:", err);
+        return res.status(500).json({ error: "Failed to check review token" });
+    }
+}
+
+// ─── Admin review management ────────────────────────────────────────────────
+
+export async function adminListFlaggedReviews(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user || (user as any).role !== "admin") return res.status(403).json({ error: "Admin only" });
+        const reviews = await prisma.hospitalReview.findMany({
+            where: { isFlagged: true },
+            orderBy: { createdAt: "desc" },
+            include: { hospital: { select: { name: true } } },
+        });
+        return res.json({ reviews });
+    } catch (err) {
+        console.error("adminListFlaggedReviews error:", err);
+        return res.status(500).json({ error: "Failed to fetch flagged reviews" });
+    }
+}
+
+export async function adminDeleteReview(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user || (user as any).role !== "admin") return res.status(403).json({ error: "Admin only" });
+        const id = str(req.params.id);
+        await prisma.hospitalReview.delete({ where: { id } });
+        return res.json({ success: true });
+    } catch (err) {
+        console.error("adminDeleteReview error:", err);
+        return res.status(500).json({ error: "Failed to delete review" });
+    }
+}
+
+export async function adminUnflagReview(req: Request, res: Response) {
+    try {
+        const user = await getSessionUser(req);
+        if (!user || (user as any).role !== "admin") return res.status(403).json({ error: "Admin only" });
+        const id = str(req.params.id);
+        await prisma.hospitalReview.update({ where: { id }, data: { isFlagged: false, flagReason: null } });
+        return res.json({ success: true });
+    } catch (err) {
+        console.error("adminUnflagReview error:", err);
+        return res.status(500).json({ error: "Failed to unflag review" });
     }
 }
