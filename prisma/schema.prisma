@@ -14,16 +14,19 @@ datasource db {
 }
 
 model User {
-  id            String     @id @default(uuid())
+  id            String               @id @default(uuid())
   name          String
-  email         String     @unique
-  createdAt     DateTime   @default(now())
-  emailVerified Boolean    @default(false)
+  email         String               @unique
+  createdAt     DateTime             @default(now())
+  emailVerified Boolean              @default(false)
   image         String?
-  updatedAt     DateTime   @updatedAt
+  updatedAt     DateTime             @updatedAt
   sessions      Session[]
   accounts      Account[]
   bookmarks     Bookmark[]
+  hospitals     RegisteredHospital[]
+  appointments  Appointment[]        @relation("PatientAppointments")
+  reviews       HospitalReview[]     @relation("UserReviews")
 
   role String? @default("user")
 
@@ -89,4 +92,124 @@ model Bookmark {
   @@unique([userId, hospitalId])
   @@index([userId])
   @@map("bookmark")
+}
+
+// ── Registered Hospitals (provider-managed) ──────────────────────────────
+
+model RegisteredHospital {
+  id                 String           @id @default(uuid())
+  ownerId            String
+  owner              User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name               String
+  registrationNumber String?
+  type               String           @default("General")
+  address            String
+  city               String
+  state              String
+  pincode            String
+  latitude           Float?
+  longitude          Float?
+  phone              String
+  email              String
+  website            String?
+  description        String?
+  isVerified         Boolean          @default(false)
+  isActive           Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  doctors            HospitalDoctor[]
+  prices             HospitalPrice[]
+  appointments       Appointment[]
+  reviews            HospitalReview[]
+
+  @@index([ownerId])
+  @@index([state, city])
+  @@map("registered_hospital")
+}
+
+model HospitalDoctor {
+  id              String             @id @default(uuid())
+  hospitalId      String
+  hospital        RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  name            String
+  qualification   String
+  specialty       String
+  subSpecialty    String?
+  experienceYears Int                @default(0)
+  consultationFee Int                @default(500)
+  availableDays   String             @default("Mon,Tue,Wed,Thu,Fri")
+  availableFrom   String             @default("09:00")
+  availableTo     String             @default("17:00")
+  maxSlotsPerDay  Int                @default(20)
+  phone           String?
+  isActive        Boolean            @default(true)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  appointments    Appointment[]
+
+  @@index([hospitalId])
+  @@map("hospital_doctor")
+}
+
+model HospitalPrice {
+  id          String             @id @default(uuid())
+  hospitalId  String
+  hospital    RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  category    String // e.g. "Surgery", "Consultation", "Diagnostics"
+  name        String
+  description String?
+  priceMin    Int
+  priceMax    Int
+  currency    String             @default("INR")
+  isActive    Boolean            @default(true)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([hospitalId])
+  @@map("hospital_price")
+}
+
+model Appointment {
+  id              String             @id @default(uuid())
+  hospitalId      String
+  hospital        RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctorId        String?
+  doctor          HospitalDoctor?    @relation(fields: [doctorId], references: [id])
+  patientId       String
+  patient         User               @relation("PatientAppointments", fields: [patientId], references: [id], onDelete: Cascade)
+  patientName     String
+  patientPhone    String
+  patientEmail    String
+  procedure       String
+  appointmentDate DateTime
+  appointmentTime String
+  status          String             @default("pending") // pending | confirmed | cancelled | completed
+  notes           String?
+  estimatedCost   Int?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@map("appointment")
+}
+
+model HospitalReview {
+  id         String             @id @default(uuid())
+  hospitalId String
+  hospital   RegisteredHospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User               @relation("UserReviews", fields: [authorId], references: [id], onDelete: Cascade)
+  authorName String
+  rating     Int
+  title      String?
+  comment    String
+  visitDate  DateTime?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  @@index([hospitalId])
+  @@index([authorId])
+  @@map("hospital_review")
 }
